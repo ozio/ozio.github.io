@@ -1,0 +1,142 @@
+# Generate video
+
+Source URL: https://swiftaisdk.github.io/SwiftAISDK/core/generate-video/
+
+Use `generateVideo` when a provider exposes text-to-video or image-to-video.
+
+```swift title="Examples/Sources/GenerateVideo/main.swift"
+import SwiftAISDK
+
+@main
+struct GenerateVideoExample {
+    static func main() async throws {
+        let provider = try AIProviders.google()
+        let model = try provider.videoModel("veo-3.1-generate-preview")
+
+        let result = try await model.generateVideo(
+            "A tiny robot walks across a desk and waves.",
+            aspectRatio: "16:9",
+            durationSeconds: 4
+        )
+
+        print(result.urls.first ?? result.base64Videos.first ?? "")
+    }
+}
+```
+
+For image-to-video models, include a source image.
+
+```swift
+let image = ImageInputFile(
+    data: imageData,
+    mediaType: "image/png",
+    fileName: "start.png"
+)
+
+let result = try await model.generateVideo(
+    "Animate the scene with a slow camera push.",
+    image: image,
+    durationSeconds: 5
+)
+```
+
+Some providers accept explicit frame images or reference images instead of a single starting image:
+
+```swift
+let result = try await model.generateVideo(
+    "Animate the transition between these frames.",
+    frameImages: [
+        VideoFrameImage(image: firstFrame, frameType: .firstFrame),
+        VideoFrameImage(image: lastFrame, frameType: .lastFrame),
+    ],
+    inputReferences: [styleReference]
+)
+```
+
+`frameImages` is used for providers that distinguish first and last frames. `inputReferences` is used for reference-to-video or style/reference-image workflows. Providers that do not support a combination return warnings or provider-specific errors rather than silently changing the request.
+
+## Async Start And Status
+
+Models conforming to `AsyncVideoModel` expose serializable start/status
+operations in addition to the existing unary `VideoModel` call. Pass `poll` to
+the facade to select that flow. The facade creates one stable idempotency key
+per logical start and reuses it across transient start retries, so retrying a
+lost response does not intentionally create a second paid job:
+
+```swift
+let result = try await AI.generateVideo(
+    model: model,
+    request: VideoGenerationRequest(prompt: "A slow aerial shot."),
+    poll: VideoGenerationPollOptions(
+        intervalMilliseconds: 2_000,
+        timeoutMilliseconds: 600_000
+    )
+)
+```
+
+A caller-supplied `Idempotency-Key` header wins. Black Forest Labs FLUX 3, Fal,
+ByteDance, Gateway, Topaz, and [HeyGen](/SwiftAISDK/providers/heygen/) are operation adapters. Callers can invoke
+`AI.startVideo` and `AI.getVideoStatus` (or the model-level
+`startVideoGeneration` and `videoGenerationStatus`) and persist the returned
+JSON operation across processes.
+
+Models with native webhook support can opt into the same flow without polling:
+
+```swift
+let result = try await AI.generateVideo(
+    model: model,
+    request: VideoGenerationRequest(prompt: "Animate the storyboard."),
+    webhook: {
+        VideoGenerationWebhookRegistration(
+            url: "https://example.com/hooks/video"
+        ) { abortSignal in
+            try await webhookInbox.nextVideoEvent(abortSignal: abortSignal)
+        }
+    }
+)
+```
+
+Fal forwards the registration URL through its native `fal_webhook` start
+parameter, while Gateway forwards it as `callbackUrl`. The webhook factory is
+not invoked for providers without native webhook support; Black Forest Labs
+ByteDance, Topaz, and HeyGen emit an unsupported warning and fall back to polling.
+`timeoutMilliseconds` also bounds the webhook wait, and caller cancellation
+closes either path.
+
+Each async model declares `maxVideosPerCall`. When `request.count` is larger,
+the facade starts independent provider operations and merges their URLs/base64
+payloads, warnings, and provider metadata in request order. Fal declares a
+one-video limit, so multi-video requests use this split automatically.
+
+## Options
+
+- `aspectRatio`, `resolution`, and `fps` describe output shape and playback.
+- `durationSeconds` requests clip duration.
+- `image` supplies an image-to-video starting frame.
+- `frameImages` supplies typed first-frame and last-frame images.
+- `inputReferences` supplies reference images for providers that support them.
+- `seed` requests deterministic output when supported.
+- `count` requests multiple videos.
+- `providerOptions` carries provider-specific request controls.
+- `poll` selects/configures shared async start/status polling.
+- `webhook` supplies a cancellation-aware endpoint/notification registration.
+- `extraBody`, `headers`, `abortSignal`, `retryPolicy`, and `telemetry` follow the shared facade behavior.
+
+## Results
+
+`VideoGenerationResult` may contain hosted URLs, base64 videos, or an operation ID:
+
+- `urls`
+- `base64Videos`
+- `operationID`
+- `warnings`
+- `providerMetadata`
+- `requestMetadata`
+- `responseMetadata`
+
+HeyGen supports text, first-frame image, and mixed image/video/audio reference
+generation through `AIProviders.heyGen().video("heygen-video-1")`. Its completed
+result contains a signed MP4 URL; the adapter does not download it. Persist the
+operation and check status again to refresh the URL. See the
+[HeyGen guide](/SwiftAISDK/providers/heygen/) for typed options, input validation,
+reported metadata, and a compile-checked example.

@@ -1,0 +1,238 @@
+# Error handling
+
+Source URL: https://swiftaisdk.github.io/SwiftAISDK/core/error-handling/
+
+Every facade call is `async throws`, and streams are `AsyncThrowingStream`s. Catch specific error types when you need structured fields, then fall back to `Error` for logging.
+
+```swift title="Examples/Sources/ErrorHandling/main.swift"
+import SwiftAISDK
+
+@main
+struct ErrorHandlingExample {
+    static func main() async throws {
+        let provider = try AIProviders.openAI()
+        let model = try provider.languageModel("gpt-4.1-mini")
+
+        do {
+            let result = try await model.generateText(
+                "Summarize this document.",
+                options: LanguageGenerationOptions(
+                    retryPolicy: AIRetryPolicy(maxRetries: 1)
+                )
+            )
+            print(result.text)
+        } catch let error as AIAbortError {
+            print("Cancelled: \(error.reason ?? "no reason")")
+        } catch let error as AIError {
+            switch error {
+            case .missingAPIKey(let provider, let variables):
+                print("\(provider) needs one of: \(variables.joined(separator: ", "))")
+            case .unsupportedModel(let provider, let capability, let modelID):
+                print("\(provider) cannot use \(modelID) for \(capability.rawValue)")
+            case .invalidArgument(let argument, let message):
+                print("Invalid \(argument): \(message)")
+            case .apiCall(let apiError):
+                print("\(apiError.provider) HTTP \(apiError.statusCode): \(apiError.responseBody)")
+                print(apiError.responseHeaders)
+            case .invalidResponse(let provider, let message):
+                print("\(provider) returned an invalid response: \(message)")
+            case .gateway(let gatewayError):
+                print("Gateway \(gatewayError.statusCode): \(gatewayError.message)")
+            case .invalidURL(let url):
+                print("Invalid URL: \(url)")
+            case .timeout(let durationNanoseconds):
+                print("Timed out after \(durationNanoseconds) ns")
+            }
+        } catch {
+            print("Unexpected error: \(error)")
+        }
+    }
+}
+```
+
+## Common Error Types
+
+`AIError` is the primary cross-provider error enum:
+
+- `missingAPIKey` when credentials are missing.
+- `unsupportedModel` when a provider cannot route a model to the requested capability.
+- `invalidArgument` for invalid options, inputs, provider options, URLs, or tool settings.
+- `invalidResponse` when a provider response shape is not usable.
+- `apiCall` for provider HTTP failures.
+- `gateway` for Vercel Gateway-specific errors.
+- `invalidURL` for malformed URLs.
+- `timeout` for facade timeout failures.
+
+Other public error types cover narrower workflows:
+
+- `AIAbortError` for caller cancellation through `AIAbortController`.
+- `AIRetryError` when retry orchestration fails or is cancelled.
+- `AIStreamProviderError` for a structured provider-owned failure reported
+after a language stream has started.
+- `AINoOutputError` when a provider returns a valid response without usable output.
+- `AITypeValidationError` and `AIObjectGenerationError` for structured output parsing, schema validation, and decoding.
+- `AINoSuchToolError`, `AIInvalidToolInputError`, `AIToolCallRepairError`, `AIInvalidToolApprovalError`, `AIInvalidToolApprovalSignatureError`, and `AIToolCallNotFoundForApprovalError` for tool execution and approval flows.
+- `MCPClientError` for MCP protocol, transport, and server errors.
+- `AIToolChoiceViolationError` when a required or specifically named tool is
+absent from a completed model response.
+
+## HTTP Failures
+
+For provider HTTP failures, inspect status, body, and headers from the `AIAPICallError` carried by `AIError.apiCall`. `AIError.apiCallError` also exposes gateway failures in the same shape.
+
+```swift
+do {
+    _ = try await model.generateImage("A small app icon.")
+} catch let error as AIError {
+    if let apiError = error.apiCallError {
+        print(apiError.provider)
+        print(apiError.statusCode)
+        print(apiError.responseBody)
+        print(apiError.responseHeaders)
+    }
+}
+```
+
+## No Output
+
+When a provider succeeds but returns no usable content, catch `AINoOutputError` and inspect `kind`.
+
+```swift
+do {
+    _ = try await model.generateImage("A tiny app icon.")
+} catch let error as AINoOutputError {
+    switch error.kind {
+    case .image:
+        print("The provider returned no image.")
+    case .speech:
+        print("The provider returned no speech audio.")
+    case .transcript:
+        print("The provider returned no transcript.")
+    default:
+        print(error.description)
+    }
+}
+```
+
+## Retries And Timeouts
+
+Facade calls retry transient failures by default with `AIRetryPolicy.default`. Disable retries for deterministic tests or when the caller handles retries elsewhere.
+
+Image generation that completes without an image throws `AINoOutputError` with
+`kind == .image`. Its `calls` collection retains per-call warnings, usage,
+provider metadata, and response metadata for diagnosis even though the aggregate
+output is empty.
+
+```swift
+let result = try await model.generateText(
+    "Do not retry this request.",
+    options: LanguageGenerationOptions(retryPolicy: .none)
+)
+```
+
+Set `timeoutNanoseconds` on the retry policy to bound a complete facade call.
+
+```swift
+let options = LanguageGenerationOptions(
+    retryPolicy: AIRetryPolicy(
+        maxRetries: 2,
+        timeoutNanoseconds: 30_000_000_000
+    )
+)
+
+let result = try await model.generateText("Summarize.", options: options)
+```
+
+For `AI.streamText`, pass `AIStreamTimeoutConfiguration` to add a per-model-step
+deadline plus first-semantic and inter-semantic deadlines. Semantic timeout
+failures are surfaced as `AIStreamTimeoutError`; non-output metadata and
+keep-alives do not reset those timers. `totalNanoseconds` retains the
+complete-call behavior, while `stepNanoseconds` re-arms for each model call.
+Total and step budgets include retry backoff; a step remains active through
+client-side tool execution. When any configured deadline wins, the provider
+and tool abort signals carry the `TimeoutError` reason name. Typed `Output`
+streams use the same configuration.
+
+By default, streaming retries only happen before the first emitted part. Set
+`streamRetries` to a positive count to additionally retry retryable in-band
+provider error events after streaming has started. Text already delivered to
+the caller cannot be retracted, so a replacement attempt can repeat a prefix;
+thrown post-output transport or framing failures and non-retryable provider
+errors are still surfaced rather than retried.
+
+Language streams distinguish provider-reported error events from failures that stop the transport or parser:
+
+- `.error(message:rawValue:)` is a repeatable in-band `LanguageStreamPart`. The full stream forwards every such part and records `error` as the provisional step outcome; a later explicit provider terminal reason remains authoritative. Read `part.streamProviderError` to normalize its message, provider type/code, status, retryability, and original payload into `AIStreamProviderError`.
+- setup, HTTP, framing, and network failures are thrown by the async sequence;
+- if a provider closes after an in-band error without its own terminal part, the facade supplies one `finishMetadata` with finish reason `error`;
+- `toTextStream()` intentionally skips in-band error parts, matching its text-only role, but still throws stream-stopping failures.
+
+With `streamRetries` absent or zero, an in-band error is exposed and the model
+call is not retried after the caller could have observed it. When post-start
+recovery is enabled, a qualifying retryable error and the failed attempt's tail
+are suppressed if a replacement attempt succeeds. Consumers that need exposed
+provider error payloads should use the full `LanguageStreamPart` sequence
+rather than `toTextStream()`.
+
+```swift
+for try await part in model.streamText("Stream this.") {
+    if let providerError = part.streamProviderError {
+        print(providerError.type ?? "provider_error")
+        print(providerError.code ?? .null)
+        print(providerError.isRetryable)
+    }
+}
+```
+
+Language-model streaming requires an `AIStreamingTransport`. If provider settings contain a send-only custom `AITransport`, unary generation still works, while streaming throws a non-retryable `AIError.invalidArgument` instead of silently buffering the complete response. Non-success streaming HTTP responses are bounded by the request response-size limit and retain their status, headers, and body when mapped to the provider error.
+
+```swift
+do {
+    for try await part in model.streamText("Stream this.") {
+        print(part)
+    }
+} catch {
+    print("Stream failed after yielding available parts: \(error)")
+}
+```
+
+## Cancellation
+
+Use `AIAbortController` when the caller can cancel an operation, such as a user leaving a screen.
+
+```swift
+let controller = AIAbortController()
+
+let task = Task {
+    try await model.generateImage(
+        "A poster concept.",
+        abortSignal: controller.signal
+    )
+}
+
+controller.abort(reason: "User closed the editor")
+
+do {
+    _ = try await task.value
+} catch let error as AIAbortError {
+    print(error.description)
+}
+```
+
+Cancellation also propagates when a caller stops consuming a language stream early. SwiftAISDK cancels the provider producer task and the active HTTP response-body read; an explicit abort preserves the `AIAbortError` reason even when URLSession reports cancellation through another underlying error.
+
+## Redirect Safety
+
+Provider-controlled download URLs are followed manually. SwiftAISDK validates
+every redirect target before issuing the next request, preserves provider
+credentials for same-origin hops, and removes them when the origin changes.
+Use `fetchUntrustedURL` for the same policy in application-owned downloads. It
+forwards only the safe first-hop header allowlist to an unrelated origin;
+arbitrary credentials require an exact `credentialedOrigin` and stay removed
+after any cross-origin redirect.
+This does not yet claim resolver-backed DNS answer pinning; that remains a
+transport-level gap.
+
+## Logging Safely
+
+Result and error metadata is useful for debugging, but it may contain provider response bodies, headers, prompts, or generated content. Prefer logging structured status fields first, and redact request bodies or response bodies before shipping logs to external systems.

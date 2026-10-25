@@ -1,0 +1,94 @@
+# Generate text
+
+Source URL: https://swiftaisdk.github.io/SwiftAISDK/core/generate-text/
+
+Use `generateText` when you want a complete response before continuing your workflow.
+
+```swift title="Examples/Sources/GenerateText/main.swift"
+import SwiftAISDK
+
+@main
+struct GenerateTextExample {
+    static func main() async throws {
+        let provider = try AIProviders.openAI()
+        let model = try provider.languageModel("gpt-4.1-mini")
+
+        let result = try await model.generateText("Write one sentence about Swift concurrency.")
+
+        print(result.text)
+    }
+}
+```
+
+## Request Options
+
+Common options map to provider-agnostic model settings:
+
+- `temperature`, `topP`, `topK`
+- `maxOutputTokens`
+- `stopSequences`
+- `seed`
+- `headers`
+- `providerOptions`
+- `extraBody`
+- `abortSignal`
+- `retryPolicy`, `timeoutNanoseconds`, and `telemetry`
+
+Use `providerOptions` for documented provider-specific behavior. Use `extraBody` only as a low-level escape hatch when the provider has not yet grown a typed option.
+
+```swift
+let result = try await model.generateText(
+    "Be concise.",
+    options: LanguageGenerationOptions(
+        providerOptions: [
+            "openai": [
+                "parallelToolCalls": false,
+                "store": false,
+            ],
+        ]
+    )
+)
+```
+
+## Results
+
+`TextGenerationResult` includes the normalized text plus metadata you can use for logging, billing, and debugging:
+
+- `content`
+- `text`
+- `reasoning`
+- `finishReason`
+- `usage`
+- `files`
+- `sources`
+- `toolCalls`
+- `toolResults`
+- `toolApprovalRequests`
+- `toolApprovalResponses`
+- `steps`
+- `responseMessages`
+- `warnings`
+- `requestMetadata`
+- `providerMetadata`
+- `responseMetadata`
+
+`content` preserves the ordered result parts, including text, reasoning, files, sources, tool calls, tool results, approval requests, approval responses, and custom provider parts. The convenience arrays are derived from the same content when possible.
+
+Generated file and reasoning-file parts that contain `data:` or HTTP(S) URLs
+are materialized into `AIStreamFile.data` before the result is returned. Remote
+downloads enforce the shared private-host, redirect, size, and abort checks;
+provider credentials are not forwarded to an unrelated origin. Provider file
+references remain references and are not downloaded.
+
+The URL checks do not yet pin a DNS answer to the connection address. If your
+application accepts provider-selected remote files in a hostile network
+environment, treat resolver-level DNS rebinding protection as a remaining
+transport gap.
+
+## Message pruning
+
+`pruneMessages(..., reasoning: .all)` and `.beforeLastMessage` remove both
+textual `.reasoning` and `.reasoningFile` parts within the selected scope.
+Ordinary `.file` content is retained.
+
+When you enable tools, `steps` records each model/tool loop step and `responseMessages` contains the assistant/tool messages that can be appended to the next request or stored in conversation history.

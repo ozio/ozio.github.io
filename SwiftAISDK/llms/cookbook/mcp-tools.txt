@@ -1,0 +1,192 @@
+# MCP tools
+
+Source URL: https://swiftaisdk.github.io/SwiftAISDK/cookbook/mcp-tools/
+
+Modern MCP `2026-07-28` tool calls can return `input_required`. Advertise
+`clientCapabilities: ["elicitation": ["form": [:]]]` and register
+`onElicitationRequest` to answer form requests. SwiftAISDK continues the original
+operation using a new RPC ID, exact opaque `requestState` and scoped
+`inputResponses`. This is protocol continuation, not a transport failure retry.
+The client permits eight rounds with sixteen inputs each; the original timeout
+and abort signal cover the entire exchange, including the form callback.
+Unsupported sampling, roots or URL input requests fail without continuation.
+
+## OAuth refresh storage
+
+Shared OAuth stores can implement
+`invalidateCredentials(_:context:)` and atomically compare the supplied
+`context.tokens` before deleting tokens. This preserves credentials installed
+by a concurrent successful refresh. Existing one-argument implementations
+continue to receive unconditional invalidation through the default adapter.
+
+Authorization-server metadata changes now throw
+`MCPOAuthAuthorizationServerMismatchError` with code
+`authorization_server_mismatch`. Catch this type when presenting a distinct
+reauthorization message; it does not trigger token invalidation or retry.
+
+Use MCP when tools live outside your process or are shared by multiple clients.
+
+```swift
+import SwiftAISDK
+
+let mcp = try await MCPClient.connect(
+    transport: try MCPHTTPTransport(url: "https://mcp.example.com/rpc")
+)
+
+let tools = try await mcp.tools()
+
+let provider = try AIProviders.openAI()
+let model = try provider.languageModel("gpt-4.1-mini")
+
+let answer = try await model.generateText(
+    "Search the docs and summarize the answer.",
+    tools: LanguageToolOptions(Array(tools.values), maxSteps: 4)
+)
+
+print(answer.text)
+```
+
+## When to Use This Recipe
+
+- Your tools are published by an MCP server.
+- Your app should discover tool schemas at runtime.
+- You want the same tool catalog available to multiple Swift clients.
+
+For local processes, use `MCPStdioTransport`. For remote servers, use `MCPHTTPTransport`.
+
+SwiftAISDK tracks `@ai-sdk/mcp@2.0.81`. The current client absorbs its
+protocol/HTTP transport and OAuth compatibility hardening behind the same
+`MCPClient.connect` workflow. Non-successful POST/SSE responses retain HTTP
+status, URL, and response-body diagnostics; existing tool-discovery code does
+not need a migration.
+
+For `MCPStdioTransport`, explicitly configured environment values win over the
+small inherited process allowlist. This includes intentionally replacing
+`PATH`, `HOME`, or another inherited key for the child process.
+
+OAuth retries reuse a stored authorization-server choice when discovery is
+temporarily unavailable, and concurrent requests that observe the same stale
+token coalesce behind one refresh before they retry.
+
+OAuth providers with dynamically registered client credentials should override
+`isClientInformationDynamicallyRegistered()` to return `true` for those stored
+credentials. On `invalid_client` or `unauthorized_client`, SwiftAISDK discards
+and re-registers only dynamically registered clients; pre-registered client
+information is preserved. The MCP protocol-version discovery header is also
+removed when a redirect crosses origins.
+
+Each discovered definition retains its complete raw `annotations` value and
+offers typed `MCPToolAnnotations` access to `title`, `readOnlyHint`,
+`destructiveHint`, `idempotentHint`, and `openWorldHint`. These fields are
+untrusted hints for presentation and planning; do not use them as an
+authorization boundary. Malformed values for a known annotation field make
+`tools/list` fail instead of silently changing its meaning.
+
+Servers may return `structuredContent` without a text `content` array. The
+client serializes that value into canonical JSON text for the dynamic tool's
+model-facing result while preserving the structured value. OAuth discovery
+also treats an origin-only issuer with or without its trailing slash as the
+same issuer; path-bearing issuer URLs remain exact.
+
+An `invalid_grant` caused by a failed refresh invalidates only that captured
+refresh generation and retries authorization. An authorization-code
+`invalid_grant` propagates without deleting unrelated stored tokens or retrying
+the same code. Event subscriptions are described in the [MCP Events recipe](../mcp-events/).
+
+## Discovery, shell execution, and credential binding
+
+HTTP protocol discovery waits for the response instead of using the one-second
+stdio probe. Set `initializationOptions: .init(timeoutMilliseconds: ...)` on
+`MCPClient.connect` to bound the complete operation; cancellation still applies.
+Custom transports opt in through `waitsForProtocolVersionDiscovery`.
+
+On macOS and Linux, `MCPStdioTransport` and `MCPStdioConfig`
+accept `shell: .disabled` (the default), `.system` (`/bin/sh`), or
+`.executable("/path/to/shell")`. Enabled shells interpret the command and joined
+arguments as shell syntax, including expansions; supply trusted command text.
+Direct execution preserves literal argument boundaries.
+
+OAuth clients with an existing secret must configure the credentials' `issuer`
+or supply stored authorization-server information before starting authorization.
+A matching flow pin cannot override a conflicting credential issuer or token
+endpoint. An `invalid_grant` retry retains the validated token binding after
+credential invalidation. Public clients without custom authentication may still
+start without a preconfigured binding.
+
+Swift custom implementations of `authenticateTokenRequest` must additionally
+return `true` from `usesCustomClientAuthentication` and supply an issuer or stored
+binding. Swift protocols cannot infer whether this optional hook was overridden;
+the explicit capability flag is required to enforce the pre-redirect check.
+
+## Migrating pre-registered OAuth providers
+
+Set the issuer from the credential's original registration or trusted app
+configuration before calling `MCPOAuth.auth`. Do not copy an MCP server's newly
+advertised authorization server into an existing credential just to satisfy the
+check. Allowlisting an authorization server also does not establish which server
+issued that credential.
+
+```swift
+let credentials = MCPOAuthClientInformation(
+    clientID: "your-registered-client-id",
+    clientSecret: "read-from-your-secure-store",
+    issuer: "https://auth.example.com"
+)
+```
+
+Return these credentials from `clientInformation()`. Alternatively, restore a
+previously established binding through `authorizationServerInformation()`:
+
+```swift
+let trustedBinding = MCPOAuthAuthorizationServerInformation(
+    authorizationServerURL: URL(string: "https://auth.example.com")!,
+    tokenEndpoint: URL(string: "https://auth.example.com/token")!,
+    issuer: "https://auth.example.com"
+)
+```
+
+Implement `saveAuthorizationServerInformation(_:)`, `saveState(_:)`,
+`storedState()`, `saveCodeVerifier(_:)` and `codeVerifier()` so the validated
+binding, state and PKCE verifier survive the authorization round trip. Pass the
+callback's `code`, `state` and optional `iss` to `MCPOAuth.auth` as
+`authorizationCode`, `callbackState` and `callbackIssuer`.
+The SDK saves the flow binding after checking the configured credential issuer or
+trusted stored binding, before redirecting to authorization. It saves tokens after
+the successful code exchange; persist them in `saveTokens(_:)` for the same account
+and client.
+
+If your provider overrides `authenticateTokenRequest`, also declare
+`usesCustomClientAuthentication` as `true` and configure one of the bindings
+above. A custom actor provider can use:
+
+```swift
+nonisolated let usesCustomClientAuthentication = true
+```
+
+On `MCPOAuthAuthorizationServerMismatchError`, stop authorization and resolve the
+account's expected server. Do not replace a trusted binding with the discovered
+value or retry the same secret against it. A rejected refresh can restart on the
+same validated server after its token generation is invalidated; a changed server
+is still rejected. An authorization-code `invalid_grant` is not retried.
+
+### Run the offline migration example
+
+From the repository root, run:
+
+```sh
+swift run --package-path Examples MCPOAuthMigration
+```
+
+The [complete example](https://github.com/SwiftAISDK/SwiftAISDK/tree/main/Examples/Sources/MCPOAuthMigration)
+implements an actor provider and a strict mock transport. It executes both an
+issuer-bound secret flow and a custom-authentication flow with a stored binding,
+including the redirect, state/PKCE storage, callback and token exchange. It uses
+only dummy values, makes no network requests, opens no browser, reads no environment
+credentials and prints no tokens or secrets. The custom assertion is an inert mock,
+not an implementation of JWT signing. A successful run ends with
+`MCP_OAUTH_MIGRATION_OFFLINE_OK`.
+
+For a real app, use its secure credential store and authorization-session callback,
+and supply real client authentication from a trusted configuration. The offline
+example proves the SDK flow and migration wiring; it does not verify a live server's
+registration, consent or token policy.

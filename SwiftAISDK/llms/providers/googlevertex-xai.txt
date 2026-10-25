@@ -1,0 +1,23 @@
+# "googleVertex.xai"
+
+Source URL: https://swiftaisdk.github.io/SwiftAISDK/providers/googlevertex-xai/
+
+## Package
+
+`@ai-sdk/google-vertex`
+
+## Factories
+
+`AIProviders.googleVertexXAI`
+
+## Capabilities
+
+- Language
+
+## Notes
+
+Vertex xAI mirrors upstream Google Vertex 5.0.122 through the shared OpenAI-compatible request and response surface.
+
+Factory argument requirements are defined by the public Swift factory signatures. Use [Public symbols](/SwiftAISDK/reference/generated/public-symbols/) when you need the exact initializer or factory declaration.
+
+Return to the [provider matrix](/SwiftAISDK/providers/).

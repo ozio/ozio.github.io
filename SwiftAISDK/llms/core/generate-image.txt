@@ -1,0 +1,85 @@
+# Generate image
+
+Source URL: https://swiftaisdk.github.io/SwiftAISDK/core/generate-image/
+
+Use `generateImage` when a provider exposes an image model. The Swift-native convenience accepts the prompt directly and builds an `ImageGenerationRequest` for you.
+
+```swift title="Examples/Sources/GenerateImage/main.swift"
+import SwiftAISDK
+
+@main
+struct GenerateImageExample {
+    static func main() async throws {
+        let provider = try AIProviders.openAI()
+        let model = try provider.imageModel("gpt-image-1")
+
+        let result = try await model.generateImage(
+            "A small watercolor robot reading Swift code.",
+            size: "1024x1024",
+            count: 1
+        )
+
+        print(result.urls.first ?? result.base64Images.first ?? "")
+    }
+}
+```
+
+For image editing, pass input files and an optional mask.
+
+```swift
+let source = ImageInputFile(
+    data: imageData,
+    mediaType: "image/png",
+    fileName: "source.png"
+)
+
+let result = try await model.generateImage(
+    "Replace the background with a quiet desk.",
+    files: [source]
+)
+```
+
+## Options
+
+Image models expose asynchronous tri-state input capabilities. `nil` means the
+provider does not know whether this model accepts the input, so it should not
+be treated as a negative capability:
+
+```swift
+let filesSupported: Bool? = await model.supportsFileInputs
+let masksSupported: Bool? = await model.supportsMaskInputs
+```
+
+Provider model tables supply known values. Azure and generic compatible image
+servers report unknown values. `AIImageModelMiddleware` can override either
+flag asynchronously, including overriding a known value to `nil`.
+
+- `size` and `aspectRatio` describe the output shape.
+- `seed` requests deterministic output when a provider supports it.
+- `count` requests multiple images.
+- `files` and `mask` support image editing.
+- `providerOptions` carries provider-specific controls.
+- `extraBody`, `headers`, `abortSignal`, `retryPolicy`, and `telemetry` follow the shared facade behavior.
+
+## Results
+
+`ImageGenerationResult` may contain hosted URLs, base64 images, or both:
+
+- `urls`
+- `base64Images`
+- `usage`
+- `warnings`
+- `providerMetadata`
+- `requestMetadata`
+- `responseMetadata`
+- `calls`, one `ImageGenerationCall` per underlying model request, preserving
+call-scoped images, warnings, usage, provider metadata, and response metadata.
+
+The aggregate URL/base64/usage fields remain convenient for callers that do not
+need per-request attribution. Use `calls` when cost or response metadata must
+remain associated with an individual provider call.
+
+If the provider completes without any URL or base64 image, `generateImage`
+throws `AINoOutputError`. For image failures its `calls` property preserves the
+same per-call warnings, usage, provider metadata, and response metadata, so an
+empty aggregate result does not discard diagnostic evidence.

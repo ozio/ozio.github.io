@@ -1,0 +1,26 @@
+# "googleVertex.maas"
+
+Source URL: https://swiftaisdk.github.io/SwiftAISDK/providers/googlevertex-maas/
+
+## Package
+
+`@ai-sdk/google-vertex`
+
+## Factories
+
+`AIProviders.googleVertexMaaS`
+
+## Capabilities
+
+- Language
+- Completion
+- Embedding
+- Image
+
+## Notes
+
+Vertex MaaS mirrors upstream 5.0.122 with OpenAI-compatible language, completion, embedding, and image factories. Maverick and Scout default `max_tokens` to 8192 while preserving an explicit caller value.
+
+Factory argument requirements are defined by the public Swift factory signatures. Use [Public symbols](/SwiftAISDK/reference/generated/public-symbols/) when you need the exact initializer or factory declaration.
+
+Return to the [provider matrix](/SwiftAISDK/providers/).

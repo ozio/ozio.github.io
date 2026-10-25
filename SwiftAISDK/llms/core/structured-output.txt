@@ -1,0 +1,121 @@
+# Structured output
+
+Source URL: https://swiftaisdk.github.io/SwiftAISDK/core/structured-output/
+
+Use structured output when your app needs a Swift value rather than free-form prose.
+
+```swift title="Examples/Sources/StructuredOutput/main.swift"
+import SwiftAISDK
+
+struct Summary: Decodable, Sendable {
+    var title: String
+    var bullets: [String]
+}
+
+@main
+struct StructuredOutputExample {
+    static func main() async throws {
+        let schema = AIJSONSchema<Summary>(
+            [
+                "type": "object",
+                "properties": [
+                    "title": ["type": "string"],
+                    "bullets": [
+                        "type": "array",
+                        "items": ["type": "string"],
+                    ],
+                ],
+                "required": ["title", "bullets"],
+            ],
+            name: "summary"
+        )
+
+        let provider = try AIProviders.openAI()
+        let model = try provider.languageModel("gpt-4.1-mini")
+
+        let result = try await model.generateObject(
+            "Summarize the SwiftAISDK README.",
+            schema: schema
+        )
+
+        print(result.object.title)
+    }
+}
+```
+
+## Output Facade
+
+SwiftAISDK also mirrors the upstream-style `Output` entry point on `generateText` and `streamText`.
+
+```swift
+let result = try await model.generateText(
+    "Return a compact summary.",
+    output: Output.object(
+        schema: schema.jsonSchema,
+        name: schema.name,
+        as: Summary.self
+    )
+)
+
+print(result.output.bullets)
+```
+
+New code can use `Output` for text, object, array, choice and JSON strategies.
+`generateObject` and `streamObject` remain callable and now emit stable
+`AISDK_DEP_GENERATE_OBJECT` / `AISDK_DEP_STREAM_OBJECT` warnings.
+Unified Output calls suppress warnings from their internal object helper.
+The default console logger emits each deprecation code once; custom warning
+loggers still receive every warning.
+
+## Output Strategies
+
+- `Output.text()` returns plain text through the same result wrapper used by the other strategies.
+- `Output.object(schema:as:)` validates JSON, decodes a `Decodable` Swift value, and keeps the raw output.
+- `Output.array(element:minItems:maxItems:as:)` expects an `elements` envelope,
+publishes optional array bounds in the generated JSON Schema, and rejects a
+final result outside those bounds.
+- `Output.choice(choices:)` constrains output to one of the provided strings.
+- `Output.json()` returns schema-free `JSONValue`.
+
+All strategies preserve text, reasoning, usage, warnings, provider metadata, response metadata, and the underlying `TextGenerationResult`.
+
+A provider may set `TextGenerationResult.structuredOutputText` to select the
+JSON answer while retaining all generated text and content. OpenAI Responses
+selects the last `final_answer` message for JSON requests. A nil selection falls
+back to concatenated text; an empty selection is explicit and can fail parsing.
+Plain text output continues to expose every draft and final message. JSON and
+reasoning extraction middleware transform the selected text alongside content.
+
+```swift
+let labels = Output.array(
+    element: ["type": "string"],
+    minItems: 2,
+    maxItems: 4,
+    as: String.self
+)
+```
+
+For source compatibility, the constructor remains nonthrowing. A negative bound
+or `minItems > maxItems` is rejected when generation or streaming begins, before
+the model performs work.
+
+## Streaming Output
+
+`streamText(..., output:)` maps language stream parts into `AIOutputStreamPart`:
+
+- `textDelta` for raw text deltas
+- `partialOutput` for incremental structured values when available
+- `output` for the final validated output
+- `source`, `warning`, `metadata`, `responseMetadata`, `finish`, and `raw` for surrounding stream state
+
+Partial object and array parsing uses the Swift partial JSON repair path, so incomplete trailing fragments can be ignored while already-complete fields or elements continue to stream.
+
+Typed object and array streams accept the same `streamRetries` option as raw
+`streamText`. A retryable in-band provider error can restart the whole typed
+output pipeline with failed-attempt parsing state isolated. JSON/schema/decoding
+failure after a complete provider response is not a provider-stream retry and
+does not consume this budget.
+
+## Repair Hooks
+
+The object facades and `Output` strategies can use `repairText` to make one model output repair attempt after invalid JSON, schema validation, or decoding failures. Errors carry `AIObjectGenerationError` context including the strategy, failure kind, generated text, and whether repair was attempted.

@@ -1,0 +1,115 @@
+# Evaluation
+
+Source URL: https://swiftaisdk.github.io/SwiftAISDK/core/evaluate/
+
+`AI.experimentalEvaluate` remains a source-compatible facade for existing JSON-state callers. New code can use [Decision V4](../decide/) for ordered text/JSON/file evidence and refusal handling. TypeSafe uses `/systemone`, OpenAI uses native `/decisions`, Gateway uses `/decision-model`, and Anthropic/Google use language adapters. Custom endpoint emulators should update these experimental envelopes and the `decision` structured-schema name.
+
+It sends one shared JSON state and a keyed question map, validates provider
+support and every returned answer, retries transient failures, and preserves
+usage, warnings, rounding, provider metadata, and response metadata.
+
+## Evaluate with a language-model adapter
+
+Anthropic and Google keep strict language-adapter output. OpenAI uses native decisions while preserving its request options, aborts, headers and response metadata.
+
+```swift
+let anthropic = try AIProviders.anthropic()
+let model = try anthropic.evaluationModel("claude-sonnet-4-6")
+
+let result = try await AI.experimentalEvaluate(
+    model: model,
+    state: [
+        "answer": "Paris",
+        "reference": "Paris"
+    ],
+    questions: [
+        "correct": .boolean(
+            instructions: "Does the answer match the reference?"
+        ),
+        "quality": .score(
+            instructions: "Rate answer quality.",
+            criteria: ["Incorrect", "Partially correct", "Fully correct"]
+        ),
+        "tone": .choice(
+            instructions: "Classify the tone.",
+            criteria: [
+                "neutral": "Plain and factual.",
+                "promotional": "Persuasive or sales-oriented."
+            ]
+        )
+    ],
+    providerOptions: ["anthropic": ["effort": "high"]]
+)
+
+if case let .boolean(probability)? = result.answers["correct"] {
+    print(probability)
+}
+```
+
+Choice criteria are keyed labels. Score criteria are an ordered rubric and can
+return a finite fractional position inside its zero-based range. Boolean
+answers are `P(true)` in `0...1`; they are not thresholded into a `Bool`.
+
+## Use a native Gateway evaluation model
+
+Gateway sends the Evaluation V4 wire contract directly:
+
+```swift
+let gateway = try AIProviders.gateway()
+let model = try gateway.evaluationModel("typesafe-ai/jev")
+let result = try await AI.experimentalEvaluate(
+    model: model,
+    state: ["response": responseText],
+    questions: [
+        "safe": .boolean(instructions: "Is the response safe?")
+    ]
+)
+```
+
+Gateway routes the model through its native endpoint. For a direct TypeSafe AI
+call, use `AIProviders.typeSafeAI().evaluationModel("jev-latest")`; both routes
+return the same provider-neutral `AIEvaluationResult` shape.
+
+## Lifecycle callbacks and telemetry
+
+Evaluation accepts request-local `runtimeContext` plus async `onStart` and
+`onEnd` callbacks. Callback payloads receive the complete runtime context;
+`onEnd` runs only after a successful, validated result.
+
+```swift
+let result = try await AI.experimentalEvaluate(
+    model: model,
+    state: ["response": responseText],
+    questions: [
+        "safe": .boolean(instructions: "Is the response safe?")
+    ],
+    telemetry: Telemetry.Options(
+        functionID: "release.safety",
+        includeRuntimeContext: ["tenant": true]
+    ),
+    runtimeContext: [
+        "tenant": "acme",
+        "requestSecret": "callback-only"
+    ],
+    onStart: { event in
+        print("evaluating", event.callID)
+    },
+    onEnd: { event in
+        print("answers", event.answers)
+    }
+)
+```
+
+Telemetry records the outer `ai.evaluate` lifecycle and the underlying
+`ai.evaluate.doEvaluate` model call. Only runtime-context keys explicitly set
+to `true` in `includeRuntimeContext` are copied to telemetry events; this does
+not redact the callback payload.
+
+## Registry and custom providers
+
+`AIProviderRegistry` resolves `provider:model` evaluation IDs when the routed
+provider conforms to `AIEvaluationProvider`. `customProvider` can register
+direct `AIEvaluationModelReference` values or fall back to another provider.
+Invalid question maps, unsupported question types, missing or extra answers,
+out-of-range values, and invalid provider versions fail before an unvalidated
+result reaches the application.

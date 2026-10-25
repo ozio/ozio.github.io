@@ -1,0 +1,131 @@
+# Decision
+
+Source URL: https://swiftaisdk.github.io/SwiftAISDK/core/decide/
+
+`AI.experimentalDecide` returns validated answers to a named question map.
+OpenAI uses `/decisions`, Perplexity uses `/v1/decisions`, Gateway uses `/decision-model`, TypeSafe AI uses
+`/systemone`, and Anthropic/Google use `DecisionLanguageModel` with structured
+output. These providers expose `decisionModel(...)`; registries and custom
+providers route `AIDecisionModelReference` values.
+
+```swift
+import Foundation
+import SwiftAISDK
+
+let provider = try AIProviders.openAI()
+let result = try await AI.experimentalDecide(
+    model: try provider.decisionModel("gpt-6-luna"),
+    state: .parts([
+        .text("Review this support reply."),
+        .json(["reply": "Your replacement ships tomorrow."]),
+        .file(mediaType: "image/png", data: .url(URL(string: "https://example.com/package.png")!))
+    ]),
+    questions: [
+        "helpful": .boolean(instructions: "Does the reply address the request?"),
+        "tone": .choice(instructions: "Choose the tone.", criteria: ["Friendly": "Warm and helpful", "Neutral": "Matter of fact", "Rude": "Dismissive"]),
+        "quality": .score(instructions: "Rate the reply.", criteria: ["Poor", "Adequate", "Excellent"])
+    ]
+)
+print(result.answers)
+```
+
+The facade resolves file URLs and data URLs before provider calls and preserves
+part order, filenames, and file provider options. `.json([…])` is one JSON
+value; `.parts([])` is an empty evidence list. `Data`, base64 strings, URLs,
+and provider references are distinct `AIDecisionFileData` cases.
+
+Choice distributions must cover every option and sum to one. Scores are
+weighted means of the indexed criteria. Boolean answers represent P(true).
+Values must be finite and within their rubric bounds; missing/extra answers,
+malformed distributions, and unsupported question types fail validation.
+Provider-declared rounding relaxes sum/weighted-score precision checks; the
+chosen option must be maximal within the declared rounding uncertainty of both probabilities.
+
+If any question is refused, raw provider results can contain `.refusal`, while
+the facade throws `AIDecisionRefusalError` for the entire decision. No partial
+answer map is reported as successful, and a refusal does not retry provider I/O.
+
+## Output budget and instructions
+
+Use `maxOutputTokens` (an integer of at least one) and `reasoning` to control
+supported adapters. Language-model adapters forward both and default reasoning
+to `none`; Gateway forwards supplied values. OpenAI, Perplexity and TypeSafe
+native Decision endpoints warn when these shared controls are unsupported.
+Both controls are included in start/end callbacks and recorded telemetry input.
+
+Choice, Score and Boolean instructions may be omitted (`.null` in the native
+representation) when criteria describe the judgment. A Score rubric may have
+one level. Boolean questions without instructions need at least one non-null
+criterion. Box instructions remain required. Provider restrictions still apply:
+OpenAI omits absent Choice/Score instructions and composes Boolean criteria
+into the predicate text; Perplexity accepts one to ten non-null score levels. Legacy Evaluation validation stays
+unchanged.
+
+## Perplexity decisions
+
+```swift
+let perplexity = try AIProviders.perplexity()
+let result = try await AI.experimentalDecide(
+    model: try perplexity.decisionModel("pplx-judge"),
+    state: .text("The package arrived cracked."),
+    questions: ["damaged": .boolean(criteria: ["true": "Package is damaged"])]
+)
+```
+
+Perplexity supports 1–128 named questions, Choice rubrics with 1–255 options,
+and Score rubrics with 1–10 non-null levels. It preserves full-precision
+probabilities, confidence and score legends under `providerMetadata.perplexity`.
+It does not support Box. Inline PNG/JPEG/WebP evidence, including nested JSON
+image blocks, is limited to eight images across the shared state.
+
+## Media limits
+
+- OpenAI accepts inline PNG, JPEG, WebP, and GIF images, with optional image detail.
+- `DecisionLanguageModel` accepts image evidence alongside text/JSON.
+- Perplexity accepts up to eight inline PNG, JPEG or WebP images.
+- Gateway forwards inline bytes/base64 after URL normalization by the facade.
+- TypeSafe AI accepts text/JSON and inline PNG/JPEG images. Box questions return finite normalized edges with `left < right` and `top < bottom`; other adapters reject Box before model I/O.
+- Native provider-file references are unsupported by these decision adapters.
+
+## Callbacks, telemetry, and compatibility
+
+Async `onStart`/`onEnd` callbacks receive typed state/questions/answers and the
+complete `runtimeContext`. Existing `Telemetry.Integration.record` records
+`ai.decide` and `ai.decide.doDecide`; input/output controls and selected
+runtime-context keys determine the recorded payload. Response metadata keeps
+the actual resolved model and provider response ID when supplied.
+
+`AI.experimentalEvaluate`, Evaluation protocols, result types, and old factory
+signatures remain callable. Their JSON-array state retains its original meaning;
+use the new `stateParts:` overload for ordered Evaluation evidence. New code
+should use Decision names. Custom mocks for experimental OpenAI/Gateway
+Evaluation should now serve `/decisions` and `/decision-model` envelopes;
+language-backed mocks should use the schema name `decision`.
+
+## TypeSafe image decisions
+
+TypeSafe image evidence is sent as multipart `request.json` plus image files.
+`TypeSafeAIFilePartProviderOptions` controls a unique nonempty reference and
+whether it is inserted into state. By default the SDK inserts a generated
+reference, or reuses an explicit reference already present in a state string
+(including nested JSON values). Object keys do not count as references.
+`insertReference: false` requires an explicit reference for use in instructions
+or criteria. Repeated references send repeated image context upstream.
+
+```swift
+let provider = AIProviders.typeSafeAI()
+let result = try await AI.experimentalDecide(
+    model: try provider.decisionModel("jev-preview"),
+    state: .parts([.file(
+        mediaType: "image/png", data: .data(imageBytes),
+        providerOptions: TypeSafeAIFilePartProviderOptions(reference: "[photo]").providerOptions
+    )]),
+    questions: ["object": .box(instructions: "The mug in [photo]")],
+    providerOptions: TypeSafeAIDecisionModelOptions(longContext: true).providerOptions
+)
+```
+
+Images or Box questions enable TypeSafe's experimental image header. The
+optional long-context setting enables its separate 262k-token context header;
+upstream documents this mode as slower and less accurate. Confidence metadata
+and two-decimal rounding remain available.
